@@ -1,0 +1,15 @@
+[binaries]
+ar = 'llvm-ar'
+as = 'llvm-as'
+c = 'clang'
+cmake = 'cmake'
+cpp = 'clang++'
+c_ld = 'lld'
+pkg-config = 'pkg-config'
+strip = 'llvm-strip'
+
+[host_machine]
+system = 'darwin'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
