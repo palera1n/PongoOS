@@ -1522,7 +1522,7 @@ static void
 ep0_out_interrupt(void) {
     uint32_t doepint = reg_read(rDOEPINT(0));
     reg_write(rDOEPINT(0), doepint);
-    bool is_setup = !!(doepint & 0x8008);
+    bool is_setup = !!((gSynopsysCoreVersion < 0x300a) ? (doepint & 0x8) : (doepint & 0x8000));
     bool is_data  = !is_setup && !!(doepint & 0x1);
     if (is_setup) {
         // We've received a setup packet.
