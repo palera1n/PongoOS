@@ -41,12 +41,24 @@ int _open(const char *name, int flags, int mode) { return -1; }
 off_t _lseek_r(struct _reent *reent, int file, off_t ptr, int dir) { return 0; }
 int _close_r(struct _reent *reent, int file) { return -1; }
 
-static char stdout_buf[STDOUT_BUFLEN];
-static volatile int stdout_buf_len;
+static volatile uint32_t stdout_buf_off;
+static volatile uint32_t stdout_buf_len;
 static volatile bool stdout_blocking;
 static lock stdout_lock;
+#define STDOUT_BASE 0xfa0000000ULL
+#define STDOUT_HEAD (char*)(STDOUT_BASE + stdout_buf_off)
+#define STDOUT_TAIL (char*)(STDOUT_BASE + stdout_buf_off + stdout_buf_len)
 
 extern char preemption_over;
+
+void io_init(void)
+{
+    // Grab a page and map it three times, ringbuffer style
+    uint64_t stdout_buf = ppage_alloc();
+    map_range(STDOUT_BASE + (0 * STDOUT_BUFLEN), stdout_buf, STDOUT_BUFLEN, 3, 1, true);
+    map_range(STDOUT_BASE + (1 * STDOUT_BUFLEN), stdout_buf, STDOUT_BUFLEN, 3, 1, true);
+    map_range(STDOUT_BASE + (2 * STDOUT_BUFLEN), stdout_buf, STDOUT_BUFLEN, 3, 1, true);
+}
 
 void set_stdout_blocking(bool block)
 {
@@ -55,11 +67,18 @@ void set_stdout_blocking(bool block)
     lock_release(&stdout_lock);
 }
 
-void fetch_stdoutbuf(char* to, int* len) {
+void fetch_stdoutbuf(char *to, uint32_t *len)
+{
     lock_take(&stdout_lock);
-    memcpy(to, stdout_buf, stdout_buf_len);
-    *len = stdout_buf_len;
-    stdout_buf_len = 0;
+    uint32_t sz = *len;
+    if(sz > stdout_buf_len)
+    {
+        sz = stdout_buf_len;
+    }
+    memcpy(to, STDOUT_HEAD, sz);
+    *len = sz;
+    stdout_buf_off = (stdout_buf_off + sz) % STDOUT_BUFLEN;
+    stdout_buf_len -= sz;
     lock_release(&stdout_lock);
 }
 
@@ -71,16 +90,8 @@ ssize_t _write_r(struct _reent *reent, int file, const void *ptr, size_t len)
         case 2: break;
         default: panic("Write to unknown fd: %d", file);
     }
-    if(file == 1) {
-        extern uint64_t dis_int_count;
-        if (dis_int_count != 0) {
-            panic("write() to stdout with interrupts disabled - please use stderr instead\n");
-        }
-        lock_take(&stdout_lock);
-    }
-    int i;
     const char *str = ptr;
-    for(i = 0; i < len; i++)
+    for(size_t i = 0; i < len; ++i)
     {
         if (str[i] == '\0') {
             serial_putc('\r');
@@ -89,31 +100,58 @@ ssize_t _write_r(struct _reent *reent, int file, const void *ptr, size_t len)
         serial_putc(str[i]);
         dockchannel_putc(str[i]);
         screen_putc(str[i]);
-
-        if(file != 1) continue;
-
-    retry:;
-        if(stdout_buf_len >= STDOUT_BUFLEN - 1)
-        {
-            if(stdout_blocking) // blocking
-            {
-                lock_release(&stdout_lock);
-                task_yield();
-                lock_take(&stdout_lock);
-                goto retry;
-            }
-            else // non-blocking = discard
-            {
-                --stdout_buf_len;
-                memmove(stdout_buf, stdout_buf+1, stdout_buf_len);
-            }
-        }
-        stdout_buf[stdout_buf_len++] = str[i];
     }
-    if(file == 1) lock_release(&stdout_lock);
+    if(file == 1)
+    {
+        extern uint64_t dis_int_count;
+        if(dis_int_count != 0)
+        {
+            panic("write() to stdout with interrupts disabled - please use stderr instead\n");
+        }
+        while(len > 0)
+        {
+            lock_take(&stdout_lock);
+            uint32_t oldlen = stdout_buf_len;
+            if(stdout_blocking)
+            {
+                size_t max = STDOUT_BUFLEN - oldlen;
+                if(max > len)
+                {
+                    max = len;
+                }
+                if(!max)
+                {
+                    lock_release(&stdout_lock);
+                    task_yield();
+                    continue;
+                }
+                memcpy(STDOUT_TAIL, str, max);
+                stdout_buf_len = oldlen + max;
+                str += max;
+                len -= max;
+            }
+            else
+            {
+                size_t max = STDOUT_BUFLEN;
+                if(max > len)
+                {
+                    max = len;
+                }
+                memcpy(STDOUT_TAIL, str + len - max, max);
+                uint32_t newlen = oldlen + max;
+                if(newlen > STDOUT_BUFLEN)
+                {
+                    stdout_buf_off = (stdout_buf_off + (newlen - STDOUT_BUFLEN)) % STDOUT_BUFLEN;
+                    newlen = STDOUT_BUFLEN;
+                }
+                stdout_buf_len = newlen;
+                len = 0;
+            }
+            lock_release(&stdout_lock);
+        }
+    }
     return len;
 }
-
 
 lock stdin_lock;
 char stdin_buf[512];

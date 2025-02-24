@@ -191,6 +191,9 @@ __attribute__((noinline)) void pongo_entry_cached(void)
     // Setup VM
     vm_init();
 
+    // Map ringbuffer
+    io_init();
+
     // Draw logo and set up framebuffer
     screen_init();
 

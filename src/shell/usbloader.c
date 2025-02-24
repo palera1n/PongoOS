@@ -208,14 +208,9 @@ bool ep0_device_request(struct setup_packet *setup)
                         return false;
                     }
                     static char stdoutbuf_copy[STDOUT_BUFLEN];
-                    int xferlen = setup->wLength;
+                    uint32_t xferlen = setup->wLength;
                     char *buf = stdoutbuf_copy;
                     fetch_stdoutbuf(buf, &xferlen);
-                    if(xferlen > setup->wLength)
-                    {
-                        buf += xferlen - setup->wLength;
-                        xferlen = setup->wLength;
-                    }
                     ep0_begin_data_in_stage(buf, xferlen, NULL);
                     return true;
                 }

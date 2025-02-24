@@ -446,10 +446,11 @@ extern void command_puts(const char* val);
 extern void pongo_syscall_entry(struct task* task, uint32_t sysnr, uint64_t* state);
 extern uint64_t vatophys_force(uint64_t kvaddr);
 #ifdef PONGO_PRIVATE
-#define STDOUT_BUFLEN 0x1000
+#define STDOUT_BUFLEN PAGE_SIZE
+extern void io_init(void);
 extern volatile uint8_t command_in_progress;
 extern void set_stdout_blocking(bool block);
-extern void fetch_stdoutbuf(char* to, int* len);
+extern void fetch_stdoutbuf(char *to, uint32_t *len);
 extern void usbloader_init(void);
 extern void pmgr_init(void);
 extern void command_init(void);
