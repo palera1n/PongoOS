@@ -604,13 +604,15 @@ struct endpoint_state {
     uint32_t in_flight;
     // Whether we're transferring the maximum size allowed by setup_packet.wLength. Relevant for ZLP.
     uint8_t transfer_max : 1;
+    // IN endpoints only: txfifo num
+    uint8_t txfifo : 5;
 };
 
 // The endpoints.
-static struct endpoint_state ep0_in;
-static struct endpoint_state ep0_out;
-static struct endpoint_state ep1_in;
-static struct endpoint_state ep2_out;
+static struct endpoint_state ep0_in  = { .n = 0, .dir_in = 1 };
+static struct endpoint_state ep0_out = { .n = 0, .dir_in = 0 };
+static struct endpoint_state ep1_in  = { .n = 1, .dir_in = 1 };
+static struct endpoint_state ep2_out = { .n = 2, .dir_in = 0 };
 
 // ---- Low-level transfer API for IN endpoints ---------------------------------------------------
 
@@ -1132,12 +1134,13 @@ ep_out_recv_data_done(struct endpoint_state *ep) {
 // The maximum number of iterations we'll loop for when waiting for a USB register write to take
 // effect.
 
-__attribute__((used)) static void
-ep_in_activate(struct endpoint_state *ep, uint8_t n, uint8_t type, uint16_t max_packet_size, uint8_t txfifo) {
-    USB_DEBUG(USB_DEBUG_FUNC, "EP%u IN activate", n);
-    ep->n = n;
-    ep->dir_in = 1;
+static void ep_in_activate(struct endpoint_state *ep, /*uint8_t n,*/ uint8_t type, uint16_t max_packet_size, uint8_t txfifo)
+{
+    USB_DEBUG(USB_DEBUG_FUNC, "EP%u IN activate", ep->n);
+    //ep->n = n;
+    //ep->dir_in = 1;
     ep->type = type;
+    ep->txfifo = txfifo;
     ep->max_packet_size = max_packet_size;
     // Use the default DMA buffer.
     ep->xfer_dma_data = ep->default_xfer_dma_data;
@@ -1151,13 +1154,14 @@ ep_in_activate(struct endpoint_state *ep, uint8_t n, uint8_t type, uint16_t max_
                 | (1 << 15) | max_packet_size);
     }
     // Start receiving interrupts.
-    reg_or(rDAINTMSK, (1 << n));
+    reg_or(rDAINTMSK, (1 << ep->n));
 }
-__attribute__((used))static void
-ep_out_activate(struct endpoint_state *ep, uint8_t n, uint8_t type, uint16_t max_packet_size) {
-    USB_DEBUG(USB_DEBUG_FUNC, "EP%u OUT activate", n);
-    ep->n = n;
-    ep->dir_in = 0;
+
+static void ep_out_activate(struct endpoint_state *ep, /*uint8_t n,*/ uint8_t type, uint16_t max_packet_size)
+{
+    USB_DEBUG(USB_DEBUG_FUNC, "EP%u OUT activate", ep->n);
+    //ep->n = n;
+    //ep->dir_in = 0;
     ep->type = type;
     ep->max_packet_size = max_packet_size;
     // Use the default DMA buffer.
@@ -1172,79 +1176,131 @@ ep_out_activate(struct endpoint_state *ep, uint8_t n, uint8_t type, uint16_t max
                 | (1 << 15) | max_packet_size);
     }
     // Start receiving interrupts.
-    reg_or(rDAINTMSK, (1 << (n + 16)));
+    reg_or(rDAINTMSK, (1 << (ep->n + 16)));
 }
 
-__attribute__((used))static void
-ep_in_abort(struct endpoint_state *ep) {
-    USB_DEBUG(USB_DEBUG_FUNC, "EP%u IN abort", ep->n);
+static void ep_disable(struct endpoint_state *ep)
+{
+    USB_DEBUG(USB_DEBUG_FUNC, "EP%u %s disable", ep->n, ep->dir_in ? "IN" : "OUT");
+    if(ep->dir_in)
+    {
+        if(reg_read(rDIEPCTL(ep->n)) & 0x80000000) // EP enabled
+        {
+            reg_write(rGINTSTS, 0x00000040); // Global IN NAK effective
+            reg_or(rDCTL, 0x00000080); // Set global non-periodic IN NAK
+            while(1)
+            {
+                if(reg_read(rGINTSTS) & 0x00000040) // Global IN NAK effective
+                {
+                    break;
+                }
+            }
+            reg_write(rGINTSTS, 0x00000040); // Global IN NAK effective
+
+            reg_or(rDIEPCTL(ep->n), 0x08000000); // Set NAK
+            while(1)
+            {
+                if(reg_read(rDIEPINT(ep->n)) & 0x00000040) // NAK effective
+                {
+                    break;
+                }
+            }
+            reg_or(rDIEPCTL(ep->n), 0x48000000); // Disable EP
+            while(1)
+            {
+                if(reg_read(rDIEPINT(ep->n)) & 0x00000002) // EP disabled
+                {
+                    break;
+                }
+            }
+
+            if(ep->in_flight)
+            {
+                uint32_t xfer_left = reg_read(rDIEPTSIZ(ep->n)) & 0x7ffff;
+                if(xfer_left > ep->in_flight)
+                {
+                    BUG(0x6c65667432626967); // 'left2big'
+                }
+                ep->transferred += ep->in_flight - xfer_left;
+                ep->in_flight = 0;
+            }
+
+            reg_and(rGRSTCTL, ~0x000007c0); // TxFIFO mask
+            reg_or(rGRSTCTL, (ep->txfifo << 6) | 0x00000020); // TxFIFO Flush
+            while(1)
+            {
+                if(reg_read(rGRSTCTL) & 0x00000020) // TxFIFO Flush
+                {
+                    break;
+                }
+            }
+            reg_write(rDCTL, 0x00000100); // Clear global non-periodic IN NAK
+        }
+    }
+    else
+    {
+        if(reg_read(rDOEPCTL(ep->n)) & 0x80000000) // EP enabled
+        {
+            reg_write(rGINTSTS, 0x00000080); // Global OUT NAK effective
+            reg_or(rDCTL, 0x00000200); // Set global OUT NAK
+            while(1)
+            {
+                if(reg_read(rGINTSTS) & 0x00000080) // Global OUT NAK effective
+                {
+                    break;
+                }
+            }
+            reg_write(rGINTSTS, 0x00000080); // Global out NAK effective
+
+            reg_or(rDOEPCTL(ep->n), 0x48000000); // EP disabled, NAK effective
+            while(1)
+            {
+                if(reg_read(rDOEPINT(ep->n)) & 0x00000002) // EP disabled
+                {
+                    break;
+                }
+            }
+
+            reg_or(rDCTL, 0x400); // Clear Global OUT NAK
+        }
+    }
+}
+
+static void ep_abort(struct endpoint_state *ep)
+{
+    USB_DEBUG(USB_DEBUG_FUNC, "EP%u %s abort", ep->n, ep->dir_in ? "IN" : "OUT");
+    ep_disable(ep);
+    struct _reg reg = ep->dir_in ? rDIEPINT(ep->n) : rDOEPINT(ep->n);
+    reg_write(reg, reg_read(reg)); // Clear pending interrupts
     ep->transfer_size = 0;
     ep->transferred = 0;
     ep->in_flight = 0;
-    if (reg_read(rDIEPCTL(ep->n)) & 0x80000000) {
-        reg_or(rDIEPCTL(ep->n), 0x40000000);
-        while (1) {
-            if (reg_read(rDIEPINT(ep->n)) & 0x2) {
-                break;
-            }
-        }
-    }
-    reg_write(rDIEPINT(ep->n), reg_read(rDIEPINT(ep->n)));
 }
 
-__attribute__((used))static void
-ep_out_abort(struct endpoint_state *ep) {
-    USB_DEBUG(USB_DEBUG_FUNC, "EP%u OUT abort", ep->n);
-    ep->transfer_size = 0;
-    ep->transferred = 0;
-    ep->in_flight = 0;
-    if (reg_read(rDOEPCTL(ep->n)) & 0x80000000) {
-        reg_write(rGINTSTS, 0x80);    // goutnakeff
-        reg_or(rDCTL, 0x200);        // sgoutnak
-        while (1) {
-            if (reg_read(rGINTSTS) & 0x80) {
-                break;
-            }
-        }
-        reg_write(rGINTSTS, 0x80);
-        reg_or(rDOEPCTL(ep->n), 0x48000000);
-        while (1) {
-        if (reg_read(rDOEPINT(ep->n)) & 0x2) {
-                break;
-            }
-        }
-        reg_or(rDCTL, 0x400);
-    }
-    reg_write(rDOEPINT(ep->n), reg_read(rDOEPINT(ep->n)));
-}
-
-__attribute__((used)) static void
-ep_stall(struct endpoint_state *ep) {
-    USB_DEBUG(USB_DEBUG_FUNC, "EP%u %s stall", ep->n, (ep->dir_in ? "IN" : "OUT"));
-    if (ep->dir_in) {
-        reg_or(rDIEPCTL(ep->n), 0x200000);
-    } else {
-        reg_or(rDOEPCTL(ep->n), 0x200000);
-    }
+static void ep_stall(struct endpoint_state *ep)
+{
+    USB_DEBUG(USB_DEBUG_FUNC, "EP%u %s stall", ep->n, ep->dir_in ? "IN" : "OUT");
+    reg_or(ep->dir_in ? rDIEPCTL(ep->n) : rDOEPCTL(ep->n), 0x200000);
 }
 
 static bool
 usb_is_high_speed(void) {
     return (reg_read(rDSTS) & 0x6) == 0;
 }
-__attribute__((used)) static void
+static void
 usb_set_address(uint8_t address) {
     USB_DEBUG(USB_DEBUG_FUNC, "Set address %u", address);
     uint32_t dcfg = reg_read(rDCFG);
     dcfg = (dcfg & ~0x7f0) | (((uint32_t) address << 4) & 0x7f0);
     reg_write(rDCFG, dcfg);
 }
-__attribute__((used)) static void
+static void
 usb_reset(void) {
     USB_DEBUG(USB_DEBUG_FUNC, "Reset");
-    ep_in_abort(&ep0_in);
-    ep_in_abort(&ep1_in);
-    ep_in_abort(&ep2_out);
+    ep_abort(&ep0_in);
+    //ep_abort(&ep0_out);
+    ep_abort(&ep1_in);
+    //ep_abort(&ep2_out);
     usb_set_address(0);
     reg_write(rDOEPMSK, 0);
     reg_write(rDIEPMSK, 0);
@@ -1263,8 +1319,8 @@ usb_reset(void) {
     reg_write(rDOEPMSK, 0xd);
     reg_write(rDIEPMSK, 0xd);
     reg_write(rDAINTMSK, 0);
-    ep_out_activate(&ep0_out, 0, 0, EP0_MAX_PACKET_SIZE);
-    ep_in_activate(&ep0_in, 0, 0, EP0_MAX_PACKET_SIZE, 0);
+    ep_out_activate(&ep0_out, /*0,*/ 0, EP0_MAX_PACKET_SIZE);
+    ep_in_activate(&ep0_in, /*0,*/ 0, EP0_MAX_PACKET_SIZE, 0);
     ep_out_recv(&ep0_out);
 }
 
@@ -1304,12 +1360,13 @@ ep0_begin_data_in_stage(const void *data, uint32_t size, void (*callback)(void))
         size = ep0.setup_packet.wLength;
     }
     USB_DEBUG(USB_DEBUG_STAGE, "DATA IN %u", size);
-    ep0.status_out_stage_callback = callback;
     // Send the DATA IN stage from the default DMA buffer. This allows the caller to supply a
     // temporary buffer.
     if (size > ep0_in.default_xfer_dma_size) {
         BUG(0x64696e32626967);    // 'din2big'
     }
+    ep_abort(&ep0_in);
+    ep0.status_out_stage_callback = callback;
     memcpy(ep0_in.default_xfer_dma_data, data, size);
     ep0_in.transfer_max = size == ep0.setup_packet.wLength ? 1 : 0;
     ep_in_send_data(&ep0_in, ep0_in.default_xfer_dma_data, size);
@@ -1318,12 +1375,12 @@ ep0_begin_data_in_stage(const void *data, uint32_t size, void (*callback)(void))
 void
 ep0_begin_data_out_stage(bool (*callback)(const void *, uint32_t)) {
     USB_DEBUG(USB_DEBUG_STAGE, "DATA OUT %u", ep0.setup_packet.wLength);
-    ep0.data_out_stage_callback = callback;
     // Receive the DATA OUT stage into the default DMA buffer. This is a simplification but
     // limits the maximum size of the DATA OUT stage.
     if (ep0.setup_packet.wLength > ep0_out.default_xfer_dma_size) {
         BUG(0x646f7532626967);    // 'dou2big'
     }
+    ep0.data_out_stage_callback = callback;
     ep_out_recv_data(&ep0_out, ep0_out.default_xfer_dma_data, ep0.setup_packet.wLength);
     // We explicitly do not want to call ep_out_recv(&ep0_out) here; we will do that once this
     // whole stack unwinds and we're back in ep0_out_interrupt().
@@ -1770,8 +1827,8 @@ void usb_handler(void) {
         }
         if (gintsts & 0x2000) {
             struct full_configuration_descriptor *desc = get_configuration_descriptor(true);
-            ep_in_activate(&ep1_in, 1, desc->endpoint_81.bmAttributes, desc->endpoint_81.wMaxPacketSize, 2);
-            ep_out_activate(&ep2_out, 2, desc->endpoint_02.bmAttributes, desc->endpoint_02.wMaxPacketSize);
+            ep_in_activate(&ep1_in, /*1,*/ desc->endpoint_81.bmAttributes, desc->endpoint_81.wMaxPacketSize, 2);
+            ep_out_activate(&ep2_out, /*2,*/ desc->endpoint_02.bmAttributes, desc->endpoint_02.wMaxPacketSize);
         }
         if (gintsts & 0xc0000) {
             usb_ep_interrupt();
@@ -1946,8 +2003,8 @@ void usb_init(void)
     reg_write(rGINTMSK, 0x1000);
     reg_and(rDCTL, ~0x2);
 
-    ep_out_activate(&ep0_out, 0, 0, EP0_MAX_PACKET_SIZE);
-    ep_in_activate(&ep0_in, 0, 0, EP0_MAX_PACKET_SIZE, 0);
+    ep_out_activate(&ep0_out, /*0,*/ 0, EP0_MAX_PACKET_SIZE);
+    ep_in_activate(&ep0_in, /*0,*/ 0, EP0_MAX_PACKET_SIZE, 0);
 
     ep0_out.default_xfer_dma_data = (void *)   (dma_page_v + 0 * DMA_BUFFER_SIZE);
     ep0_out.default_xfer_dma_phys = (uint32_t) (dma_page_p + 0 * DMA_BUFFER_SIZE);
