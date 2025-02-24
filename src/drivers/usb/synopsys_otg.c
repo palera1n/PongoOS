@@ -1567,8 +1567,9 @@ ep0_in_interrupt(void) {
         }
     }
     if (diepint & 0x8) {
-        USB_DEBUG(USB_DEBUG_INTR, "TIMEOUT");
-        USB_DEBUG_ABORT();
+        USB_DEBUG(USB_DEBUG_INTR, "TIMEOUT EP0 IN");
+        ep_disable(&ep0_in);
+        ep_in_send(&ep0_in);
     }
     if (diepint & 0x4) {
         BUG(0x61686220696e); // 'ahb in'
@@ -1747,8 +1748,9 @@ ep1_in_interrupt(void) {
         }
     }
     if (diepint & 0x8) {
-        USB_DEBUG(USB_DEBUG_STAGE | USB_DEBUG_INTR, "TIMEOUT");
-        USB_DEBUG_ABORT();
+        USB_DEBUG(USB_DEBUG_STAGE | USB_DEBUG_INTR, "TIMEOUT EP1 IN");
+        ep_disable(&ep1_in);
+        ep_in_send(&ep1_in);
     }
     if (diepint & 0x4) {
         BUG(0x61686220696e2031); // 'ahb in 1'
