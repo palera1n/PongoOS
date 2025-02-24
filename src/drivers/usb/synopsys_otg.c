@@ -271,6 +271,7 @@ void ep0_begin_data_out_stage(bool (*callback)(const void *data, uint32_t size))
 //       wIndex is 0x1337.
 //
 
+#if 0
 static uint8_t ktrw_send_data[0x1000];
 static uint16_t ktrw_send_count;
 static uint16_t ktrw_send_in_flight;
@@ -320,8 +321,6 @@ ktrw_recv(uint16_t wLength) {
     return true;
 }
 
-extern bool ep0_device_request(struct setup_packet *setup);
-
 static bool
 ep0_vendor_request(struct setup_packet *setup) {
     if ((setup->bmRequestType & 0x80) == 0) {
@@ -364,6 +363,12 @@ usb_write_commit(void) {
         usb_in_transfer(0x81, ktrw_send_data, ktrw_send_count, ktrw_send_done);
     }
 }
+#else
+static bool ep0_vendor_request(struct setup_packet *setup)
+{
+    return false;
+}
+#endif
 
 // ---- The high-level USB API --------------------------------------------------------------------
 
@@ -372,7 +377,6 @@ static bool usb_is_high_speed(void);
 static void usb_set_address(uint8_t address);
 
 #define MAX_USB_DESCRIPTOR_LENGTH 127
-//#define MAX_USB_DESCRIPTOR_LENGTH 63
 
 static bool
 get_string_descriptor(uint8_t index) {
@@ -482,6 +486,8 @@ ep0_standard_request(struct setup_packet *setup) {
         return ep0_standard_out_request(setup);
     }
 }
+
+extern bool ep0_device_request(struct setup_packet *setup);
 
 static bool
 ep0_setup_stage(struct setup_packet *setup) {

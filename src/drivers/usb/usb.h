@@ -142,8 +142,10 @@ extern void usb_init(void);
 extern void usb_teardown(void);
 extern void ep0_begin_data_in_stage(const void *data, uint32_t size, void (*callback)(void));
 extern void ep0_begin_data_out_stage(bool (*callback)(const void *data, uint32_t size));
+#if 0
 extern size_t usb_read(void *data, size_t size);
 extern size_t usb_write(const void *data, size_t size);
+#endif
 extern void usb_in_transfer(uint8_t ep_addr, const void *data, uint32_t size, void (*callback)(void));
 extern void usb_out_transfer(uint8_t ep_addr, void *data, uint32_t size, void (*callback)(void *data, uint32_t size, uint32_t transferred));
 extern void usb_out_transfer_dma(uint8_t ep_addr, void *data, uint32_t dma, uint32_t size, void (*callback)(void *data, uint32_t size, uint32_t transferred));
