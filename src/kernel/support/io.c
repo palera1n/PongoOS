@@ -51,6 +51,72 @@ static lock stdout_lock;
 
 extern char preemption_over;
 
+#define STDIO_LOG_UART   (1 << 0)
+#define STDIO_LOG_SCREEN (1 << 1)
+#define STDIO_LOG_MAX    (STDIO_LOG_UART | STDIO_LOG_SCREEN)
+static uint8_t stdio_flags[3] =
+{
+    [1] = STDIO_LOG_MAX,
+    [2] = STDIO_LOG_MAX,
+};
+
+static void log_cmd(const char *cmd, char *args)
+{
+    uint8_t files = 0b110;
+    uint8_t mask = STDIO_LOG_MAX;
+    bool on;
+    char *parts[3] = {};
+
+    while(*args == ' ') ++args;
+    for(size_t i = 0; i < 3; ++i)
+    {
+        char *delim = strchr(args, ' ');
+        parts[i] = args;
+        if(!delim)
+        {
+            goto skip;
+        }
+        *delim = '\0';
+        args = delim + 1;
+        while(*args == ' ') ++args;
+    }
+    if(*args != '\0')
+    {
+        iprintf("Too many arguments\n");
+        goto help;
+    }
+skip:;
+    if(parts[0][0] == '\0')
+    {
+        goto help;
+    }
+
+    size_t idx = 0;
+    if(     strcmp(parts[idx], "stdout") == 0) { files = (1 << 1); ++idx; }
+    else if(strcmp(parts[idx], "stderr") == 0) { files = (1 << 2); ++idx; }
+
+    if(!parts[idx]) { iprintf("Too few arguments\n"); goto help; }
+    if(     strcmp(parts[idx], "uart")   == 0) { mask = STDIO_LOG_UART;   ++idx; }
+    else if(strcmp(parts[idx], "screen") == 0) { mask = STDIO_LOG_SCREEN; ++idx; }
+
+    if(!parts[idx]) { iprintf("Too few arguments\n"); goto help; }
+    if(     strcmp(parts[idx], "on")  == 0) { on = true;  ++idx; }
+    else if(strcmp(parts[idx], "off") == 0) { on = false; ++idx; }
+    else { iprintf("Bad arguments\n"); goto help; }
+
+    for(uint8_t f = 0; f < 3; ++f)
+    {
+        if(files & (1 << f))
+        {
+            stdio_flags[f] = on ? (stdio_flags[f] | mask) : (stdio_flags[f] & ~mask);
+        }
+    }
+
+    return;
+help:;
+    iprintf("Usage: log [stdout|stderr] [uart|screen] on|off\n");
+}
+
 void io_init(void)
 {
     // Grab a page and map it three times, ringbuffer style
@@ -58,6 +124,7 @@ void io_init(void)
     map_range(STDOUT_BASE + (0 * STDOUT_BUFLEN), stdout_buf, STDOUT_BUFLEN, 3, 1, true);
     map_range(STDOUT_BASE + (1 * STDOUT_BUFLEN), stdout_buf, STDOUT_BUFLEN, 3, 1, true);
     map_range(STDOUT_BASE + (2 * STDOUT_BUFLEN), stdout_buf, STDOUT_BUFLEN, 3, 1, true);
+    command_register("log", "control stdio logging", log_cmd);
 }
 
 void set_stdout_blocking(bool block)
@@ -91,15 +158,26 @@ ssize_t _write_r(struct _reent *reent, int file, const void *ptr, size_t len)
         default: panic("Write to unknown fd: %d", file);
     }
     const char *str = ptr;
-    for(size_t i = 0; i < len; ++i)
+    uint8_t flags = stdio_flags[file];
+    if(flags & STDIO_LOG_MAX)
     {
-        if (str[i] == '\0') {
-            serial_putc('\r');
-            dockchannel_putc('r');
+        for(size_t i = 0; i < len; ++i)
+        {
+            if(flags & STDIO_LOG_UART)
+            {
+                if(str[i] == '\0')
+                {
+                    serial_putc('\r');
+                    dockchannel_putc('\r');;
+                }
+                serial_putc(str[i]);
+                dockchannel_putc(str[i]);
+            }
+            if(flags & STDIO_LOG_SCREEN)
+            {
+                screen_putc(str[i]);
+            }
         }
-        serial_putc(str[i]);
-        dockchannel_putc(str[i]);
-        screen_putc(str[i]);
     }
     if(file == 1)
     {
