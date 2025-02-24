@@ -1720,11 +1720,12 @@ ep2_out_interrupt(void) {
                     ep2_out.transferred);
         }
     }
-    if (doepint & 0x8) {
+    // XXX: according to the manual, this is SetupDone for OUT endpoints, and not Timeout
+    /*if (doepint & 0x8) {
         USB_DEBUG(USB_DEBUG_STAGE | USB_DEBUG_INTR, "TIMEOUT");
         USB_DEBUG_PRINT_REGISTERS();
         USB_DEBUG_ABORT();
-    }
+    }*/
     if (doepint & 0x4) {
         BUG(0x61686220696e2031);    // 'ahb in 1'
     }
