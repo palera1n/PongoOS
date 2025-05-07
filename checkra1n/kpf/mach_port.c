@@ -202,6 +202,48 @@ static void kpf_convert_port_to_map_patch(xnu_pf_patchset_t *xnu_text_exec_patch
         0xff00001e,
     };
     xnu_pf_maskmatch(xnu_text_exec_patchset, "convert_port_to_map", matches_variant, masks_variant, sizeof(matches_variant)/sizeof(uint64_t), false, (void*)kpf_convert_port_to_map_callback);
+
+    // changes in iOS 18.4.1
+    // fffffff0072275ec  08504039   ldrb    w8, [x0, #0x14]
+    // fffffff0072275f0  1f050071   cmp     w8, #0x1
+    // fffffff0072275f4  01feff54   b.ne    0xfffffff0072275b4
+    // fffffff0072275f8  081440f9   ldr     x8, [x0, #0x28]
+    // fffffff0072275fc  f40308aa   mov     x20, x8
+    // fffffff007227600  082140f9   ldr     x8, [x8, #0x40]
+    // fffffff007227604  493c00b0   adrp    x9, 0xfffffff0079b0000
+    // fffffff007227608  29e13b91   add     x9, x9, #0xef8  {data_fffffff0079b0ef8}
+    // fffffff00722760c  1f0109eb   cmp     x8, x9
+    // fffffff007227610  c0000054   b.eq    0xfffffff007227628
+
+    uint64_t matches_variant2[] =
+    {
+        0x39400000, // ldrb wN, [xM, ...]
+        0x71000000, // cmp
+        0x54000000, // bne
+        0xf9400000, // ldr xN, [xM, {0x0-0x78}]
+        0xaa000000, // mov
+        0xf9402000, // ldr xN, [xM, {0x40|0x48}]
+        0x90000000, // adrp
+        0x91000000, // add
+        0xeb00001f, // cmp
+        0x54000000, // b.ne / b.eq
+    };
+    uint64_t masks_variant2[] =
+    {
+        0xffc00000,
+        0xff000000,
+        0xff000000,
+        0xffffc000,
+        0xff000000,
+        0xfffff800,
+        0x9f000000,
+        0xffc00000,
+        0xffe0fc1f,
+        0xff00001e,
+    };
+    xnu_pf_maskmatch(xnu_text_exec_patchset, "convert_port_to_map", matches_variant2, masks_variant2, sizeof(matches_variant2)/sizeof(uint64_t), false, (void*)kpf_convert_port_to_map_callback);
+
+
 }
 
 static bool found_task_conversion_eval_ldr = false;

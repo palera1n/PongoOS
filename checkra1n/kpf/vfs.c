@@ -43,22 +43,20 @@ static bool kpf_vfs_callback(struct xnu_pf_patch *patch, uint32_t *opcode_stream
     }
     found_vfs = true;
 
-    uint32_t *try = opcode_stream + 8 + sxt32(opcode_stream[8] >> 5, 19); // uint32 takes care of << 2
-    if
-    (
-        (try[0] & 0xfff0ffff) != 0xaa1003e0 || // mov x0, x{16-31}
-        (try[1] & 0xfc000000) != 0x94000000 || // bl sfree
-        (try[2] & 0xfff00fff) != 0xf85003a0 || // ldur x0, [x29, -0x...]
-        (try[3] & 0xff80001f) != 0xB4000000 || // cbz x0, {forward}
-        (try[4] & 0xfc000000) != 0x94000000    // bl vnode_put
-    )
+    // ldur x0, [x29, -0x...]
+    // cbz x0, {forward}
+    // bl vnode_put
+    uint32_t *start = find_next_insn(opcode_stream - 1, 30, 0xf85003a0, 0xfff00fff); // ldur instruction
+    start = find_next_insn(start, 4, 0x94000000, 0xfc000000); //vnode_put
+
+    if (!start)
     {
         panic_at(opcode_stream, "kpf_vfs: Failed to find vnode_put");
     }
 
     vfs_context_current = xnu_ptr_to_va(follow_call(opcode_stream + 1));
     vnode_lookup = xnu_ptr_to_va(follow_call(opcode_stream + 6));
-    vnode_put = xnu_ptr_to_va(follow_call(try + 4));
+    vnode_put = xnu_ptr_to_va(follow_call(start));
 
     puts("KPF: Found VFS");
     return true;
@@ -87,24 +85,24 @@ static void kpf_vfs_patches(xnu_pf_patchset_t *sandbox_text_exec_patchset)
         0x35000000, // cbnz w*, {forward}
         0x94000000, // bl vfs_context_current
         0xaa0003e3, // mov x3, x0
-        0xd10003a2, // sub x2, x29, 0x...
-        0x00000000, // {mov x0, x{16-31} | mov w1, 0}
-        0x00000000, // {mov x0, x{16-31} | mov w1, 0}
+        0xd10063a2, // sub x2, x29, 0x...       // be more specific here
+        0xaa1303e0, // {mov x0, x{16-31} | mov w1, 0}   // be more specific here
+        0x52800001, // {mov x0, x{16-31} | mov w1, 0}   // be more specific here
         0x94000000, // bl vnode_lookup
-        0xaa0003f0, // mov x{16-31}, x0
-        0x35000000, // cbnz w*, {forward}
+        //0xaa0003f0, // mov x{16-31}, x0     //this move instruction is no longer there!
+        //0x35000000, // cbnz w*, {forward}
     };
     uint64_t masks[] =
     {
         0xff800000,
         0xfc000000,
         0xffffffff,
-        0xffc003ff,
-        0x00000000,
-        0x00000000,
+        0xffffffff,
+        0xffffffff,
+        0xffffffff,
         0xfc000000,
-        0xfffffff0,
-        0xff800000,
+        //0xfffffff0,
+        //0xff800000,
     };
     // Mark patch as not required - the getters below will panic if needed
     xnu_pf_maskmatch(sandbox_text_exec_patchset, "vfs", matches, masks, sizeof(matches)/sizeof(uint64_t), false, (void*)kpf_vfs_callback);

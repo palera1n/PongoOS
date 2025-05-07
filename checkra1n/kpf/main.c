@@ -175,6 +175,7 @@ uint32_t* _mac_mount = NULL;
 bool kpf_has_done_mac_mount = false;
 bool kpf_mac_mount_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream) {
     puts("KPF: Found mac_mount");
+
     uint32_t* mac_mount = &opcode_stream[0];
     // search for tbnz w*, 5, *
     // and nop it (enable MNT_UNION mounts)
@@ -187,12 +188,24 @@ bool kpf_mac_mount_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream)
         DEVLOG("kpf_mac_mount_callback: failed to find NOP point");
         return false;
     }
+
     mac_mount_1[0] = NOP;
     // search for ldrb w8, [x8, 0x71]
     mac_mount_1 = find_prev_insn(mac_mount, 0x40, 0x3941c508, 0xFFFFFFFF);
     if (!mac_mount_1) {
         mac_mount_1 = find_next_insn(mac_mount, 0x40, 0x3941c508, 0xFFFFFFFF);
     }
+
+    // on iOS 18.4.1, it is
+    // add     x8, x8, #0x70
+    // ldrb    w8, [x8, #0x1]
+    if (!mac_mount_1) {
+        mac_mount_1 = find_next_insn(mac_mount, 0x40, 0x39400508, 0xFFFFFFFF);
+        if (!mac_mount_1) {
+            mac_mount_1 = find_prev_insn(mac_mount, 0x40, 0x39400508, 0xFFFFFFFF);
+        }
+    }
+
     if (!mac_mount_1) {
         kpf_has_done_mac_mount = false;
         DEVLOG("kpf_mac_mount_callback: failed to find xzr point");
@@ -209,6 +222,7 @@ bool kpf_mac_mount_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream)
         DEVLOG("kpf_mac_mount_callback: failed to find stack frame");
         return false;
     }
+
     // Now find the insn that decrements sp. This can be either
     // "stp ..., ..., [sp, -0x...]!" or "sub sp, sp, 0x...".
     // Match top bit of imm on purpose, since we only want negative offsets.
@@ -244,9 +258,11 @@ void kpf_mac_mount_patch(xnu_pf_patchset_t* xnu_text_exec_patchset) {
     
     // ios 16.4 changed the codegen, so we match both
     // r2: /x c9ff8312:ffffff3f
+    // ios 18.4:  c9ff8392   mov     x9, #0xffffffffffffe001
     matches[0] = 0x1283ffc9; // movz w/x9, 0x1ffe/-0x1fff
     masks[0] = 0x3fffffff;
     xnu_pf_maskmatch(xnu_text_exec_patchset, "mac_mount_patch2", matches, masks, sizeof(matches)/sizeof(uint64_t), false, (void*)kpf_mac_mount_callback);
+
 }
 
 bool dounmount_found;
@@ -783,18 +799,21 @@ bool vnode_lookup_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream)
         DEVLOG("vnode_lookup_callback: already ran, skipping...");
         return false;
     }
-    uint32_t *try = &opcode_stream[8]+((opcode_stream[8]>>5)&0xFFF);
-    if ((try[0]&0xFFE0FFFF) != 0xAA0003E0 ||    // MOV x0, Xn
-        (try[1]&0xFC000000) != 0x94000000 ||    // BL _sfree
-        (try[3]&0xFF000000) != 0xB4000000 ||    // CBZ
-        (try[4]&0xFC000000) != 0x94000000 ) {   // BL _vnode_put
+    // ldur x0, [x29, -0x...]
+    // cbz x0, {forward}
+    // bl vnode_put
+    uint32_t *start = find_next_insn(opcode_stream - 1, 30, 0xf85003a0, 0xfff00fff); // ldur instruction
+    start = find_next_insn(start, 4, 0x94000000, 0xfc000000); //vnode_put
+
+    if (!start) {
         DEVLOG("Failed match of vnode_lookup code at 0x%" PRIx64 "", kext_rebase_va(xnu_ptr_to_va(opcode_stream)));
         return false;
     }
     puts("KPF: Found vnode_lookup");
-    vfs_context_current = follow_call(&opcode_stream[1]);
-    vnode_lookup = follow_call(&opcode_stream[6]);
-    vnode_put = follow_call(&try[4]);
+
+    vfs_context_current = follow_call(opcode_stream + 1);
+    vnode_lookup = follow_call(opcode_stream + 6);
+    vnode_put = follow_call(start);
     xnu_pf_disable_patch(patch);
     return true;
 }
@@ -1503,7 +1522,7 @@ bool kpf_amfi_mac_syscall(struct xnu_pf_patch *patch, uint32_t *opcode_stream) {
 
     bool foundit = false;
     uint32_t *rep = opcode_stream;
-    for(size_t i = 0; i < 25; ++i)
+    for(size_t i = 0; i < 35; ++i)
     {
         uint32_t op = *rep;
         if(op == 0x321c03e2 /* orr w2, wzr, 0x10 */ || op == 0x52800202 /* movz w2, 0x10 */)
@@ -1750,6 +1769,26 @@ void kpf_amfi_kext_patches(xnu_pf_patchset_t* patchset) {
     };
     xnu_pf_maskmatch(patchset, "amfi_mac_syscall_alt", iii_matches, iii_masks, sizeof(iii_matches)/sizeof(uint64_t), false, (void*)kpf_amfi_mac_syscall);
 
+    // changes in iOS 18.4.1
+    // fffffff005a874a8  68b9ffd0   adrp    x8, 0xfffffff0051b5000
+    // fffffff005a874ac  08592191   add     x8, x8, #0x856
+    // fffffff005a874b0  62000014   b       0xfffffff005a87638
+    // fffffff005a874b4  ff1300f9   str     xzr, [sp, #0x20 {var_110}]  {0x0}
+    uint64_t v_matches[] = {
+        0xd0ffb900, // adrp     // might be too specific
+        0x91215908, // add     x8, x8, #0x856
+        0x14000000, // b
+        0xf9000000, // str
+    };
+    uint64_t v_masks[] = {
+        0xffffff00,
+        0xffffffff,
+        0xff000000,
+        0xff000000,
+    };
+    xnu_pf_maskmatch(patchset, "amfi_mac_syscall_alt", v_matches, v_masks, sizeof(v_matches)/sizeof(uint64_t), false, (void*)kpf_amfi_mac_syscall);
+
+
     // tvOS/audioOS 16 and bridgeOS 7 apparently got some cases removed, so their codegen looks different again.
     //
     // 0xfffffff008b0ad50      3f680171       cmp w1, 0x5a
@@ -1775,27 +1814,30 @@ void kpf_amfi_kext_patches(xnu_pf_patchset_t* patchset) {
 }
 
 void kpf_sandbox_kext_patches(xnu_pf_patchset_t* patchset, bool protobox_used) {
-    uint64_t matches[] = {
-        0x35000000, // CBNZ
-        0x94000000, // BL _vfs_context_current
-        0xAA0003E0, // MOV Xn, X0
-        0xD1006002, // SUB
-        0x00000000, // MOV X0, Xn || MOV W1, #0
-        0x00000000, // MOV X0, Xn || MOV W1, #0
-        0x94000000, // BL _vnode_lookup
-        0xAA0003E0, // MOV Xn, X0
-        0x35000000  // CBNZ
+    // FIXME: duplicate match pattern with kpf_vfs_patches
+    uint64_t matches[] =
+    {
+        0x35000000, // cbnz w*, {forward}
+        0x94000000, // bl vfs_context_current
+        0xaa0003e3, // mov x3, x0
+        0xd10063a2, // sub x2, x29, 0x...       // be more specific here
+        0xaa1303e0, // {mov x0, x{16-31} | mov w1, 0}   // be more specific here
+        0x52800001, // {mov x0, x{16-31} | mov w1, 0}   // be more specific here
+        0x94000000, // bl vnode_lookup
+        //0xaa0003f0, // mov x{16-31}, x0     //this move instruction is no longer there!
+        //0x35000000, // cbnz w*, {forward}
     };
-    uint64_t masks[] = {
-        0xFF000000,
-        0xFC000000,
-        0xFFFFFFE0,
-        0xFFFFE01F,
-        0x00000000,
-        0x00000000,
-        0xFC000000,
-        0xFFFFFFE0,
-        0xFF000000
+    uint64_t masks[] =
+    {
+        0xff800000,
+        0xfc000000,
+        0xffffffff,
+        0xffffffff,
+        0xffffffff,
+        0xffffffff,
+        0xfc000000,
+        //0xfffffff0,
+        //0xff800000,
     };
     xnu_pf_maskmatch(patchset, "vnode_lookup", matches, masks, sizeof(masks)/sizeof(uint64_t), true, (void*)vnode_lookup_callback);
 
@@ -2044,6 +2086,7 @@ bool load_init_program_at_path_callback(struct xnu_pf_patch *patch, uint32_t *op
             if(bl) break;
         }
     }
+
     if (!bl) {
         for(int i = 0; i < 0x30; i++)
         {
@@ -2061,6 +2104,33 @@ bool load_init_program_at_path_callback(struct xnu_pf_patch *patch, uint32_t *op
             }
         }
     }
+
+    // iOS 18.4.1
+    // fffffff007686018  29008052   mov     w9, #0x1
+    // fffffff00768601c  2221c81a   lsl     w2, w9, w8
+    // fffffff007686020  e1c30091   add     x1, sp, #0x30 {var_80}
+    // fffffff007686024  030080d2   mov     x3, #0
+    // fffffff007686028  040080d2   mov     x4, #0 // new instruction here!
+    // fffffff00768602c  9628f197   bl      mach_vm_allocate_kernel
+
+    if (!bl) {
+        for(int i = 0; i < 0x30; i++)
+        {
+            if (
+                (start[i    ] & 0xffffffe0) == 0x52800020 && // mov wN, #0x1
+                (start[i + 1] & 0xffe0fc1f) == 0x1ac02002 && // mov w2, wN, wM
+                (start[i + 2] & 0xffc003ff) == 0x910003e1 && // add x1, sp, ...
+                (start[i + 3] & 0xffffffff) == 0xd2800003 && // mov x3, #0x0
+                (start[i + 4] & 0xffffffff) == 0xd2800004 && // mov x4, #0x0
+                (start[i + 5] & 0xfc000000) == 0x94000000    // bl
+            )
+            {
+                bl = &start[i + 5];
+                mach_vm_allocate_kernel_new = true;
+                break;
+            }
+        }
+    }
     
     if (!bl) return false;
 
@@ -2071,15 +2141,13 @@ bool load_init_program_at_path_callback(struct xnu_pf_patch *patch, uint32_t *op
 }
 
 bool copyout_callsites_callback(struct xnu_pf_patch *patch, uint32_t *opcode_stream) {
-    // Don't match inlined copyout
-    if (find_prev_insn(opcode_stream-1, 20, 0x52801102, 0xffffffff)) return false; /* mov w2, #0x88 */
-
-    uint32_t* candidate = follow_call(&opcode_stream[1]);
+    uint32_t* candidate = follow_call(&opcode_stream[2]);
     if (!copyout) {
         copyout = candidate;
         puts("KPF: Found copyout");
         return true;
     }
+
     if (candidate != copyout) {
         panic("KPF: Found multiple copyout candidates");
     }
@@ -2179,23 +2247,26 @@ void kpf_md0oncores_patch(xnu_pf_patchset_t* patchset)
     xnu_pf_maskmatch(patchset, "load_init_program_at_path", iii_matches, iii_masks, sizeof(iii_matches)/sizeof(uint64_t), false, (void*)load_init_program_at_path_callback);
 
     // Find callsite(s) of copyout function
-    // Might match more than once but as long as they point the same address it's fine
-    // Note: In older iOS versions the cbnz instruction could be cbz, but we don't need it here
-    // /x 0211805200000094f00300aa00000035:ffffffff000000fcf003ffff000000ff
+    // Original copyout matches are no longer present in 18.4.1... this one works on 18.3.1 and 18.4.1: 
+    // fffffff0072a4630  e0430091   add     x0, sp, #0x10 {var_60}
+    // fffffff0072a4634  02058052   mov     w2, #0x28
+    // fffffff0072a4638  87c00294   bl      _copyout
+    // fffffff0072a463c  60000034   cbz     w0, 0xfffffff0072a4648
+
     uint64_t copyout_matches[] =
     {
-        0x52801102, // mov w2, #0x88
-        0x94000000, // bl copyout
-        0xaa0003f0, // mov x{16-31}, x0
-        0x34000000  // cb(n)z wN, ...
+        0x910043e0, // add     x0, sp, #0x10 {var_60}
+        0x52800502, // w2, #0x28
+        0x94000000, // bl _copyout
+        0x34000060  // cbz w0, 0xfffffff0072a4648
     };
 
     uint64_t copyout_masks[] =
     {
         0xffffffff,
-        0xfc000000,
-        0xffff03f0,
-        0xfe000000
+        0xffffffff,
+        0xff000000,
+        0xffffffff
     };
     xnu_pf_maskmatch(patchset, "copyout_callsites", copyout_matches, copyout_masks, sizeof(copyout_matches)/sizeof(uint64_t), true, (void*)copyout_callsites_callback);
 }
@@ -2277,7 +2348,7 @@ kpf_component_t* const kpf_components[] = {
     &kpf_proc_selfname,
     &kpf_shellcode,
     &kpf_spawn_validate_persona,
-    &kpf_overlay,
+    &kpf_overlay,   // does IOMemoryDescriptor
     &kpf_ramdisk,
     &kpf_trustcache,
     &kpf_vfs,
@@ -2714,8 +2785,8 @@ static void kpf_cmd(const char *cmd, char *args)
         if (!mdevremoveall) panic("no mdevremoveall");
         if (!mac_execve) panic("no mac_execve");
         if (!mac_execve_hook) panic("no mac_execve_hook");
-        if (!copyout) panic("no copyout");
-        if (!mach_vm_allocate_kernel) panic("no mach_vm_allocate_kernel");
+        if (!copyout) puts("!!!!!!!!!! no copyout");
+        if (!mach_vm_allocate_kernel) puts("!!!!!!!!!!!! no mach_vm_allocate_kernel");
         if (current_map_off == -1 || vm_map_page_size_off == -1) panic("no offsets");
         
         uint64_t* repatch_launchd_execve_hook_ptrs = (uint64_t*)(launchd_execve_hook_ptr - shellcode_from + shellcode_to);

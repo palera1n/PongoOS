@@ -81,14 +81,14 @@ static void kpf_launch_constraints_patch(xnu_pf_patchset_t *patchset)
     {
         0x90000000, // adrp x0, ...
         0x91000000, // add x0, x0, ...
-        0xf90003f0, // str x{16-31}, [sp]
+        0xa90003f0, // str x{16-31}, [sp]       -- in 18.4.1 it's stp     x22, x23, [sp] {var_390_1} {var_388_1}
         0x94000000, // bl IOLog
     };
     uint64_t masks[] =
     {
         0x9f00001f,
         0xffc003ff,
-        0xfffffff0,
+        0xafff03f0,
         0xfc000000,
     };
     xnu_pf_maskmatch(patchset, "launch_constraints", matches, masks, sizeof(matches)/sizeof(uint64_t), true, (void*)kpf_launch_constraints_callback);

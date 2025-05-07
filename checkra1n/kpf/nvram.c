@@ -90,6 +90,8 @@ static bool kpf_nvram_table_callback(struct xnu_pf_patch *patch, uint32_t *opcod
     }
 
     // Sanity checks
+    // this one broke on 18.4.1 but it seems to be reliable w/o
+    /*
     uint32_t reg = opcode_stream[0] & 0x1f; // adrp
     if
     (
@@ -100,6 +102,7 @@ static bool kpf_nvram_table_callback(struct xnu_pf_patch *patch, uint32_t *opcod
     {
         return false;
     }
+    */
     const char *str = (const char *)(((uint64_t)(opcode_stream + 2) & ~0xfffULL) + adrp_off(opcode_stream[2]) + ((opcode_stream[3] >> 10) & 0xfff));
     if(strcmp(str, "aapl,pci") != 0)
     {
@@ -107,7 +110,8 @@ static bool kpf_nvram_table_callback(struct xnu_pf_patch *patch, uint32_t *opcod
     }
     nvram_inline_patch = true;
 
-    uint32_t *tbnz = find_next_insn(opcode_stream + 10, 10, 0x37100000 | (opcode_stream[9] & 0x1f), 0xfff8001f); // tbnz wM, 2, 0xfffffff0077ae070
+    // on iOS 18.4.1, the tbnz follows later
+    uint32_t *tbnz = find_next_insn(opcode_stream + 10, 20, 0x37100000, 0xffff0000); // tbnz wM, 2, ...
     if(!tbnz)
     {
         panic_at(opcode_stream, "kpf_nvram_unlock: Failed to find tbnz");
@@ -269,6 +273,47 @@ static void kpf_nvram_patches(xnu_pf_patchset_t *xnu_text_exec_patchset)
         0xfffffe10,
     };
     xnu_pf_maskmatch(xnu_text_exec_patchset, "nvram_unlock", matches4, masks4, sizeof(matches4)/sizeof(uint64_t), false, (void*)kpf_nvram_table_callback);
+
+    // minimal changes in iOS 18.4.1
+    // fffffff007894d74  54c7ff90   adrp    x20, 0xfffffff00717c000
+    // fffffff007894d78  94820991   add     x20, x20, #0x260  {data_fffffff00717c260}
+    // fffffff007894d7c  20c0fff0   adrp    x0, 0xfffffff00709b000
+    // fffffff007894d80  00241391   add     x0, x0, #0x4c9  {data_fffffff00709b4c9, "aapl,pci"}
+    // fffffff007894d84  e10316aa   mov     x1, x22
+    // fffffff007894d88  275eea97   bl      _strcmp
+    // fffffff007894d8c  c0000034   cbz     w0, 0xfffffff007894da4 // same until here
+    // fffffff007894d90  88620091   add     x8, x20, #0x18 // this add is new, but another ldr and cbnz removed instead
+    // fffffff007894d94  800e40f9   ldr     x0, [x20, #0x18]
+    // fffffff007894d98  f40308aa   mov     x20, x8 // this instruction is new
+
+    uint64_t matches5[] =
+    {
+        0x90000010, // adrp xN, 0x...
+        0x91000000, // add 
+        0xf0ff0000, // adrp x0, 0x...
+        0x91000000, // add x0, x0, 0x...
+        0xaa1003e1, // mov x1, x{16-31}
+        0x94000000, // bl sym._strcmp
+        0x34000000, // cbz w0, ...
+        0x91000000, // add
+        0xf9400000, // ldr 
+        0xaa0803f4, // mov x20, x8
+    };
+    uint64_t masks5[] =
+    {
+        0x9f000010,
+        0xffc00000,
+        0xffff0000,
+        0xffc003ff,
+        0xfff0ffff,
+        0xfc000000,
+        0xffffff00,
+        0xff000000,
+        0xfffff000,
+        0xffffffff,
+    };
+    xnu_pf_maskmatch(xnu_text_exec_patchset, "nvram_unlock", matches5, masks5, sizeof(matches5)/sizeof(uint64_t), false, (void*)kpf_nvram_table_callback);
+
 }
 
 static void kpf_nvram_finish(struct mach_header_64 *hdr, palerain_option_t *palera1n_flags)

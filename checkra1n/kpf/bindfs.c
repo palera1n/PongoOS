@@ -117,13 +117,15 @@ static void kpf_fsctl_dev_by_role_patch(xnu_pf_patchset_t *xnu_text_exec_patchse
     // /x 002088520000b072:e0ffffffe0ffffff
     uint64_t matches[] =
     {
-        0x52882000, // mov wN, 0x4100
+        0x52882000, // mov wN, 0x4100           (or 0x4101 on 18.4.1)
         0x72b00000, // movk wN, 0x8000, lsl 16
+        0xeb08005f, // cmp x2, x8               // might be too specific, but works for 18.3.1 and 18.4.1
     };
     uint64_t masks[] =
     {
+        0xffffffc0,
         0xffffffe0,
-        0xffffffe0,
+        0xffffffff,
     };
     xnu_pf_maskmatch(xnu_text_exec_patchset, "fsctl_dev_by_role", matches, masks, sizeof(masks)/sizeof(uint64_t), true, (void*)kpf_fsctl_dev_by_role_callback);
 
@@ -247,6 +249,7 @@ static void kpf_shared_region_root_dir_patch(xnu_pf_patchset_t *xnu_text_exec_pa
 
 static void kpf_bindfs_patches(xnu_pf_patchset_t *xnu_text_exec_patchset)
 {
+    puts("kpf_bindfs_patches");
     // iOS 15.0: Union mounts no longer work
     if(do_bind_mounts)
     {
